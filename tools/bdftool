@@ -1,0 +1,134 @@
+#! /usr/bin/env python3
+import shutil, os, sys
+
+from pathlib import Path
+from bdffont import BdfFont
+
+def index_in_range(ranges, index):
+    if not ranges:
+        return True
+    for r in ranges:
+        if index >= r[0] and index <= r[1]:
+            return True
+    return False
+
+def fit_bitmap(bitmap, bb, font_bb, dst_size, offset):
+    font_size = (font_bb[0], font_bb[1])
+    orig_x = -font_bb[2]
+    orig_y = font_bb[1] + font_bb[3]
+    diff_top = 0
+    diff_left = 0
+    if offset:
+        diff_top = -offset[1]
+        diff_left = -offset[0]
+    elif font_size != dst_size:
+        diff_top = int((dst_size[1] - font_size[1]) / 2)
+        diff_left = int((dst_size[0] - font_size[0]) / 2)
+    diff_top += orig_y - bb[1] - bb[3]
+    diff_left += orig_x + bb[2]
+    resized = [[0 for x in range(dst_size[0])] for y in range(dst_size[1])]
+    def read_coord(row, col):
+        if row < diff_top or col < diff_left:
+            return 0
+        row -= diff_top
+        col -= diff_left
+        if row >= bb[1] or col >= bb[0]:
+            return 0
+        return bitmap[row][col]
+
+    for row in range(0, dst_size[1]):
+        for col in range(0, dst_size[0]):
+            resized[row][col] = read_coord(row, col)
+    return resized
+
+def show_preview(font, args):
+    for glyph in font.glyphs:
+        if not index_in_range(args.range, glyph.encoding): continue
+        print(f'Font size {font.dimensions}')
+        print(f'Offset {glyph.offset}')
+        print(f'BB {glyph.bounding_box}')
+        print(f'Dimensions {glyph.dimensions}')
+        bitmap = fit_bitmap(glyph.bitmap, glyph.bounding_box,
+                            font.bounding_box, args.size, args.offset)
+        for row in bitmap:
+            text = ''.join('  ' if color == 0 else '██' for color in row)
+            print(f'{text}*')
+        print()
+
+def write_output(font, args):
+    font_name = args.name or args.output.stem
+    with open(args.output, 'w') as f:
+        num_chars = 0
+        space_index = 0
+        cmdline = ' '.join(sys.argv)
+        f.write('/*\n'
+                ' * Generated with:\n'
+                ' *\n'
+                f' *   {cmdline}\n'
+                ' */\n\n')
+        f.write('#include <gxconsole.h>\n\n')
+        f.write('static const u8 pixels[] = {\n')
+        for glyph in font.glyphs:
+            if not index_in_range(args.range, glyph.encoding): continue
+            if glyph.encoding == ord(' '):
+                space_index = num_chars
+            f.write(f'    /* {num_chars} 0x{glyph.encoding:04X} */\n')
+            bitmap = fit_bitmap(glyph.bitmap, glyph.bounding_box,
+                                font.bounding_box, args.size, args.offset)
+            current_byte = 0
+            bit_pos = 7
+            for row in bitmap:
+                for color in row:
+                    current_byte |= color << bit_pos
+                    if bit_pos == 0:
+                        f.write(f'    0x{current_byte:02x},\n')
+                        current_byte = 0
+                        bit_pos = 7
+                    else:
+                        bit_pos -= 1
+            if bit_pos != 7:
+                f.write(f'    0x{current_byte:02x},\n')
+            f.write('\n')
+            num_chars += 1
+
+        ascii_offset = ord(' ') - space_index
+        f.write('};\n\n'
+                f'const GxConsoleFont {font_name} = {{\n'
+                f'    {args.size[0]}, /* char_width */\n'
+                f'    {args.size[1]}, /* char_height */\n'
+                f'    1, /* bpp */\n'
+                f'    {ascii_offset}, /* ascii_offset */\n'
+                f'    {num_chars}, /* num_chars */\n'
+                '    pixels, /* bitmap data */\n'
+                '};\n')
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-o', '--output', action='store', type=Path,
+                        help="Path for output file")
+    parser.add_argument('-n', '--name', action='store',
+                        help="Name of font in code")
+    def chr_range(string):
+        return tuple(int(x) for x in string.split('-', 2))
+    parser.add_argument('-r', '--range', action='append', type=chr_range)
+    def size(string):
+        return tuple(int(x) for x in string.split('x', 2))
+    parser.add_argument('-s', '--size', action='store', type=size,
+                        help='Set character cell size')
+    parser.add_argument('--offset', action='store', type=size,
+                        help='Set character cell offset (top left)')
+    parser.add_argument('-p', '--preview', action='store_true',
+                        help='Show font preview')
+    parser.add_argument('input_file', action='store')
+    args = parser.parse_args()
+
+    font = BdfFont.load(args.input_file)
+    if args.preview:
+        show_preview(font, args)
+    else:
+        write_output(font, args)
+
+
+if __name__ == '__main__':
+    main()
